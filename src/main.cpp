@@ -28,6 +28,11 @@
 
 #define HEARTBEAT_LED 13
 
+#if defined(SPI_OLED_DISPLAY)
+// Pin 13 is SPI SCLK; undefine heartbeat LED to prevent bus corruption
+#undef HEARTBEAT_LED
+#endif
+
 #include <Arduino.h>
 
 #include <Wire.h>
@@ -91,7 +96,6 @@ char revision[3];
 
 */
 
-String serialnum;
 unsigned long DisplayRenderMillis = 0;
 unsigned long menuMillis = 0;
 unsigned long blinkMillis = 0;
@@ -103,7 +107,6 @@ const unsigned long menuInterval = 200;
 
 TEMP_SENSOR tempsensor[TSENSORS];
 CGROUP cgroup[CELLGROUPS];
-DEFPACKET dpacket[31];
 
 void autoBatteryDiagnostics();
 
@@ -204,19 +207,15 @@ int readPacket(int regval, PACKET &packet) {
     switch (result) {
       case 1:
         Serial.println(F("LONG")); // data too long to fit in xmit buffer
-        return -1;
         break;
       case 2:
         Serial.println(F("ADDR")); // NACK on transmit of address
-        return -1;
         break;
       case 3:
         Serial.println(F("DATA")); // NACK on transmit of data
-        return -1;
         break;
       case 4:
         Serial.println(F("OTHER")); // Other unknown error
-        return -1;
         break;
     }
 #endif
@@ -224,16 +223,21 @@ int readPacket(int regval, PACKET &packet) {
     packet.msb = 0x0;
     packet.lsb = 0x0;
     packet.chk = 0x0;
-    return result;
+    return -1;
   }
 
-  Wire.requestFrom(TYPE, 3);
-  while (Wire.available()) {
-    packet.chk = Wire.read();
-    packet.msb = Wire.read();
-    packet.lsb = Wire.read();
-    packet.sum = (regval + packet.chk + packet.msb + packet.lsb + 1) % 64;
+  if (Wire.requestFrom((uint8_t)TYPE, (uint8_t)3) != 3) {
+    packet.sum = 0xff;
+    packet.msb = 0x0;
+    packet.lsb = 0x0;
+    packet.chk = 0x0;
+    return -1;
   }
+
+  packet.chk = Wire.read();
+  packet.msb = Wire.read();
+  packet.lsb = Wire.read();
+  packet.sum = (regval + packet.chk + packet.msb + packet.lsb + 1) % 64;
 
   return 0;
 }
@@ -250,7 +254,7 @@ int readSerialNumber() {
 
   for ( int itor = 0; itor < 37; itor++ ) {
     result = readPacket(0xC6, temppacket);
-    if ( result == -1 ) {
+    if ( result != 0 ) {
       return 1;
     }
     if ( temppacket.sum == 0xff && temppacket.chk == 0x0 && temppacket.msb == 0x0 && temppacket.lsb == 0x0 ) {
@@ -259,7 +263,11 @@ int readSerialNumber() {
     if ( temppacket.sum != 0 ) {
       return 1;
     }
-    memcpy(&packet[temppacket.msb], &temppacket, sizeof(temppacket));
+    if ( temppacket.msb < 37 ) {
+      memcpy(&packet[temppacket.msb], &temppacket, sizeof(temppacket));
+    } else {
+      return 1;
+    }
   }
 
   for ( int itor = 0; itor < 12; itor++ ) {
@@ -288,7 +296,6 @@ int readSerialNumber() {
 void readTemps(void) {
   PACKET temppacket;
   int result;
-  int avgtemp;
   for (int i = 0; i < TSENSORS; i++) {
     result = readPacket(0x17, temppacket); // 0x17 contains temperature data
     if ( result != 0 ) {
@@ -306,8 +313,12 @@ void readTemps(void) {
 #endif
       return;
     }
+    int16_t rawTemp = word(temppacket.msb, temppacket.lsb) & 0xFFF;
+    if (rawTemp & 0x800) {
+      rawTemp |= 0xF000; // Sign extend 12-bit two's complement
+    }
     tempsensor[i].temp = word(temppacket.msb, temppacket.lsb) & 0xFFF; // mask off 12 bits ADC
-    float ctemp = tempsensor[i].temp * 0.0625; // Sensor -256C to +256C scaled by 4096
+    float ctemp = (float)rawTemp * 0.0625; // Sensor -256C to +256C scaled by 4096
 #ifdef SERIAL_SHELL
     Serial.print(ctemp);
     Serial.println(F(" °C"));
@@ -316,8 +327,11 @@ void readTemps(void) {
 
   memset(&temppacket, 0, sizeof(temppacket));
   result = readPacket(0x55, temppacket); // 85/0x55 149/0x95 contains pack average temp
-  avgtemp = word(temppacket.msb, temppacket.lsb) & 0xFFF; // mask off 12 bits ADC
-  float atemp = avgtemp * 0.0625; // Sensor -256C to +256C scaled by 4096
+  int16_t rawAvg = word(temppacket.msb, temppacket.lsb) & 0xFFF;
+  if (rawAvg & 0x800) {
+    rawAvg |= 0xF000; // Sign extend 12-bit two's complement
+  }
+  float atemp = (float)rawAvg * 0.0625; // Sensor -256C to +256C scaled by 4096
 #ifdef SERIAL_SHELL
   Serial.print(atemp);
   Serial.println(F(" °C Pack"));
@@ -348,8 +362,10 @@ void readVoltages(void) {
       return;
     }
     number = word(temppacket.msb, temppacket.lsb) >> 11; // top 5 bits are cell group
-    cgroup[number].chk = temppacket.chk;
-    cgroup[number].voltage = word(temppacket.msb, temppacket.lsb) & 0x3FF; // 10 bits of ADC
+    if (number < CELLGROUPS) {
+      cgroup[number].chk = temppacket.chk;
+      cgroup[number].voltage = word(temppacket.msb, temppacket.lsb) & 0x3FF; // 10 bits of ADC
+    }
   }
 
   for (int itor = 0; itor < CELLGROUPS; itor++) {
@@ -369,13 +385,14 @@ void readVoltages(void) {
     }
   }
 
+#ifdef SERIAL_SHELL
   Serial.print(F("Pack voltage: "));
   Serial.print((float)packvoltage);
   Serial.println(F(" V"));
+#endif
 }
 
 float readStateOfCharge() {
-  float average_soc = 100;
   PACKET temppacket;
   int result;
   int number;
@@ -385,23 +402,23 @@ float readStateOfCharge() {
 
   result = readPacket(0x1D, temppacket);
   if ( result != 0 ) {
-    return 1;
+    return 0.0;
   }
   if ( temppacket.sum == 0xff && temppacket.chk == 0x0 && temppacket.msb == 0x0 && temppacket.lsb == 0x0 ) {
 #ifdef SERIAL_SHELL
     Serial.println(F("I2C ERR"));
 #endif
-    return 1;
+    return 0.0;
   }
   if ( temppacket.sum != 0 ) {
 #ifdef SERIAL_SHELL
     Serial.println(F("CRC ERR"));
 #endif
-    return 1;
+    return 0.0;
   }
 
   number = word(temppacket.msb, temppacket.lsb) & 0xFF; // 8 bits of SOC
-  stateofcharge = average_soc / number;
+  stateofcharge = (float)number;
 #ifdef SERIAL_SHELL
   Serial.print(stateofcharge, 2);
   Serial.println(F("% SoC"));
@@ -462,7 +479,11 @@ void autoBatteryDiagnostics() {
 
   float avgTempC = 0.0;
   for (int i = 0; i < TSENSORS; i++) {
-    avgTempC += (tempsensor[i].temp * 0.0625);
+    int16_t raw = tempsensor[i].temp;
+    if (raw & 0x800) {
+      raw |= 0xF000;
+    }
+    avgTempC += ((float)raw * 0.0625);
   }
   if (TSENSORS > 0) {
     avgTempC /= TSENSORS;
@@ -534,7 +555,7 @@ void readEveryRegister(void) {
     for (int ytor = 0; ytor < 5; ytor++ ) {
       memset(&temppacket, 0, sizeof(temppacket));
       result = readPacket(itor, temppacket);
-      if ( result == -1 ) { return; }
+      if ( result != 0 ) { return; }
       if ( temppacket.sum == 0xff && temppacket.chk == 0x0 && temppacket.msb == 0x0 && temppacket.lsb == 0x0 ) {
 #ifdef SERIAL_SHELL
         Serial.print(F("REG: "));

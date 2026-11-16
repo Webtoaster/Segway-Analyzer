@@ -78,16 +78,20 @@ void doBlink() {
 void storeLine(int line, const char *message) {
   switch(line) {
     case 1:
-      strcpy(i2cdisplay.line1, message);
+      strncpy(i2cdisplay.line1, message, sizeof(i2cdisplay.line1) - 1);
+      i2cdisplay.line1[sizeof(i2cdisplay.line1) - 1] = '\0';
       break;
     case 2:
-      strcpy(i2cdisplay.line2, message);
+      strncpy(i2cdisplay.line2, message, sizeof(i2cdisplay.line2) - 1);
+      i2cdisplay.line2[sizeof(i2cdisplay.line2) - 1] = '\0';
       break;
     case 3:
-      strcpy(i2cdisplay.line3, message);
+      strncpy(i2cdisplay.line3, message, sizeof(i2cdisplay.line3) - 1);
+      i2cdisplay.line3[sizeof(i2cdisplay.line3) - 1] = '\0';
       break;
     case 4:
-      strcpy(i2cdisplay.line4, message);
+      strncpy(i2cdisplay.line4, message, sizeof(i2cdisplay.line4) - 1);
+      i2cdisplay.line4[sizeof(i2cdisplay.line4) - 1] = '\0';
       break;
     default:
       break;
